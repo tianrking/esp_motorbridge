@@ -77,7 +77,7 @@ config MOTORBRIDGE_WIFI_PASSWORD
 
 config MOTORBRIDGE_APPLY_DEFAULT_ID_MAP_AT_BOOT
     bool "Apply default Damiao ID map at boot"
-    default y
+    default n
 
 config MOTORBRIDGE_UDP_PORT
     int "UDP control port"

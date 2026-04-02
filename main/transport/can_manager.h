@@ -17,6 +17,7 @@ void can_manager_set_rx_callback(can_rx_callback_t cb);
 esp_err_t can_manager_send(const twai_message_t *msg, int timeout_ms);
 void can_manager_trigger_scan(int min_id, int max_id);
 void can_manager_set_dump(bool enabled);
+bool can_manager_recent_rx(int32_t within_ms);
 
 #ifdef __cplusplus
 }

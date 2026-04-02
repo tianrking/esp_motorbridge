@@ -9,6 +9,8 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "app/command_router.h"
 #include "config/app_config.h"
@@ -17,7 +19,9 @@ static const char *TAG = "web_control";
 static httpd_handle_t s_server = NULL;
 static char s_last_query[256];
 static int64_t s_last_query_us = 0;
-static const int64_t WEB_DUPLICATE_GUARD_US = 120000;
+static const int64_t WEB_DUPLICATE_GUARD_US = 800000;
+static const int INTER_ID_DELAY_MS = 10;
+static const int FEEDBACK_WAIT_MS = 80;
 
 static const char *INDEX_HTML =
     "<!doctype html><html><head><meta charset='utf-8'/>"
@@ -31,6 +35,7 @@ static const char *INDEX_HTML =
     "button{border:none;padding:10px 12px;border-radius:10px;background:#0f766e;color:#fff;font-weight:600}"
     "button.gray{background:#475569}button.red{background:#b91c1c}"
     "input,select{padding:8px;border-radius:8px;border:1px solid #cbd5e1;min-width:96px}"
+    "input[type=range]{padding:0;min-width:180px;vertical-align:middle}"
     ".motors{display:grid;grid-template-columns:repeat(4,minmax(56px,1fr));gap:8px}"
     ".hint{font-size:12px;color:#64748b}.ok{color:#0f766e}.err{color:#b91c1c}"
     ".hidden{display:none}"
@@ -52,11 +57,13 @@ static const char *INDEX_HTML =
     "</div></div>"
     "<div class='card'><h2>期望值</h2>"
     "<div class='row'>"
-    "<label id='f_pos'>pos <input id='pos' type='number' step='0.001' value='0'></label>"
+    "<label id='f_pos'>pos <input id='pos' type='number' step='0.001' value='0'>"
+    "<input id='pos_r' type='range' min='-3.14' max='3.14' step='0.001' value='0'></label>"
     "<label id='f_vel'>vel <input id='vel' type='number' step='0.01' value='0'></label>"
-    "<label id='f_tau'>tau <input id='tau' type='number' step='0.01' value='0'></label>"
-    "<label id='f_vlim'>vlim <input id='vlim' type='number' step='0.01' value='0'></label>"
+    "<label id='f_tau'>tau <input id='tau' type='number' step='0.01' value='0.3'></label>"
+    "<label id='f_vlim'>vlim <input id='vlim' type='number' step='0.01' value='1'></label>"
     "<label id='f_ratio'>ratio <input id='ratio' type='number' step='0.0001' value='0.1'></label>"
+    "<label><input id='realtime' type='checkbox'> 实时下发</label>"
     "<button onclick='apply()'>下发控制</button>"
     "</div>"
     "<div id='modeHint' class='hint'></div>"
@@ -65,12 +72,20 @@ static const char *INDEX_HTML =
     "<script>"
     "const maxMotors=7;"
     "let ws=null;"
+    "let inFlight=false;"
+    "let lastSendTs=0;"
+    "let rtTimer=null;"
     "const motors=document.getElementById('motors');"
     "for(let i=1;i<=maxMotors;i++){const d=document.createElement('label');d.innerHTML=`<input type='checkbox' value='${i}' checked> M${i}`;motors.appendChild(d);}"
     "function ids(){return [...document.querySelectorAll('#motors input:checked')].map(x=>x.value).join(',');}"
     "function allSel(v){document.querySelectorAll('#motors input').forEach(x=>x.checked=v);}"
     "function show(ok,t){const m=document.getElementById('msg');m.className=ok?'hint ok':'hint err';m.textContent=t;}"
     "function setHidden(id,h){const e=document.getElementById(id);if(e){e.classList.toggle('hidden',h);}}"
+    "function maybeRealtime(){if(!document.getElementById('realtime').checked)return;clearTimeout(rtTimer);rtTimer=setTimeout(()=>apply(),120);}"
+    "function bindRealtimeInputs(){['pos','vel','tau','vlim','ratio'].forEach(k=>{const n=document.getElementById(k);if(n)n.addEventListener('input',maybeRealtime);});}"
+    "function bindPosSlider(){const p=document.getElementById('pos'),r=document.getElementById('pos_r');if(!p||!r)return;"
+    "p.addEventListener('input',()=>{r.value=p.value;});"
+    "r.addEventListener('input',()=>{p.value=r.value;maybeRealtime();});}"
     "function updateModeFields(){"
     "const m=parseInt(document.getElementById('mode').value||'1',10);"
     "const vPos=document.getElementById('pos');"
@@ -84,11 +99,24 @@ static const char *INDEX_HTML =
     "setHidden('f_vlim',!(m===2||m===4));"
     "setHidden('f_ratio',!(m===4));"
     "const h=document.getElementById('modeHint');"
-    "if(m===1){h.textContent='MIT: pos / vel / tau';if(vTau.value==='0')vTau.value='0.3';}"
-    "else if(m===2){h.textContent='PosVel: pos / vlim';if(parseFloat(vVlim.value||'0')<=0)vVlim.value='2.0';}"
-    "else if(m===3){h.textContent='Vel: vel';if(parseFloat(vVel.value||'0')===0)vVel.value='1.0';}"
-    "else if(m===4){h.textContent='ForcePos: pos / vlim / ratio';if(parseFloat(vVlim.value||'0')<=0)vVlim.value='2.0';if(parseFloat(vRatio.value||'0')<=0)vRatio.value='0.1';}"
+    "if(m===1){h.textContent='MIT: pos[-3.14,3.14] / vel[0,1] / tau(默认0.3)';"
+    "vPos.min='-3.14';vPos.max='3.14';vPos.step='0.001';"
+    "document.getElementById('pos_r').min='-3.14';document.getElementById('pos_r').max='3.14';document.getElementById('pos_r').step='0.001';"
+    "vVel.min='0';vVel.max='1';vVel.step='0.01';"
+    "vTau.min='0';vTau.max='10';vTau.step='0.01';if(vTau.value==='0')vTau.value='0.3';"
+    "if(vPos.value==='')vPos.value='0';if(vVel.value==='')vVel.value='0';}"
+    "else if(m===2){h.textContent='PosVel: pos[-3.14,3.14] / vlim[0,5]';"
+    "vPos.min='-3.14';vPos.max='3.14';vPos.step='0.001';"
+    "document.getElementById('pos_r').min='-3.14';document.getElementById('pos_r').max='3.14';document.getElementById('pos_r').step='0.001';"
+    "vVlim.min='0';vVlim.max='5';vVlim.step='0.01';if(vVlim.value==='')vVlim.value='1';if(vPos.value==='')vPos.value='0';}"
+    "else if(m===3){h.textContent='Vel: vel[-4,4]';"
+    "vVel.min='-4';vVel.max='4';vVel.step='0.01';if(vVel.value==='')vVel.value='0';}"
+    "else if(m===4){h.textContent='ForcePos: pos[-3.14,3.14] / vlim / ratio';"
+    "vPos.min='-3.14';vPos.max='3.14';vPos.step='0.001';if(vPos.value==='')vPos.value='0';"
+    "document.getElementById('pos_r').min='-3.14';document.getElementById('pos_r').max='3.14';document.getElementById('pos_r').step='0.001';"
+    "if(parseFloat(vVlim.value||'0')<=0)vVlim.value='2.0';if(parseFloat(vRatio.value||'0')<=0)vRatio.value='0.1';}"
     "if(vPos.value==='')vPos.value='0';"
+    "document.getElementById('pos_r').value=vPos.value;"
     "}"
     "function startWs(){"
     "ws=new WebSocket(`ws://${location.host}/ws`);"
@@ -99,8 +127,15 @@ static const char *INDEX_HTML =
     "}"
     "startWs();"
     "async function call(q){"
-    "if(ws&&ws.readyState===1){ws.send(q);return;}"
-    "try{const r=await fetch('/api/control?'+q);const t=await r.text();show(r.ok&&t.startsWith('ok'),t);}catch(e){show(false,'network error');}"
+    "const now=Date.now();"
+    "if(inFlight){show(false,'busy: previous command running');return;}"
+    "if(now-lastSendTs<180){show(false,'rate limited: wait a moment');return;}"
+    "inFlight=true;lastSendTs=now;"
+    "try{"
+    "if(ws&&ws.readyState===1){ws.send(q);show(true,'sent via ws');return;}"
+    "const r=await fetch('/api/control?'+q);const t=await r.text();show(r.ok&&t.startsWith('ok'),t);"
+    "}catch(e){show(false,'network error');}"
+    "finally{setTimeout(()=>{inFlight=false;},180);}"
     "}"
     "function admin(a){const q=`action=${a}&ids=${ids()}`;call(q);}"
     "function setMode(){const q=`action=set_mode&ids=${ids()}&mode=${document.getElementById('mode').value}`;call(q);}"
@@ -113,6 +148,8 @@ static const char *INDEX_HTML =
     "`&tau=${document.getElementById('tau').value}&vlim=${document.getElementById('vlim').value}&ratio=${document.getElementById('ratio').value}`;"
     "call(q);}"
     "document.getElementById('mode').addEventListener('change',updateModeFields);"
+    "bindRealtimeInputs();"
+    "bindPosSlider();"
     "updateModeFields();"
     "</script></body></html>";
 
@@ -192,6 +229,23 @@ static void dispatch_admin(uint8_t id, uint8_t op, uint8_t mode)
     msg.data[1] = id;
     msg.data[2] = mode;
     command_router_handle_can_rx(&msg);
+}
+
+static void inter_id_delay(int idx, int total)
+{
+    if (idx < total - 1) {
+        vTaskDelay(pdMS_TO_TICKS(INTER_ID_DELAY_MS));
+    }
+}
+
+static bool wait_feedback_then_next(uint8_t id, int idx, int total)
+{
+    bool got_feedback = command_router_wait_feedback(id, FEEDBACK_WAIT_MS);
+    if (!got_feedback) {
+        ESP_LOGW(TAG, "no feedback from id=%u within %dms, stop current batch", id, FEEDBACK_WAIT_MS);
+    }
+    inter_id_delay(idx, total);
+    return got_feedback;
 }
 
 static void dispatch_set_gains(uint8_t id, float kp, float kd)
@@ -345,6 +399,10 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 4, 0);
+            if (!wait_feedback_then_next(ids[i], i, n)) {
+                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
+                return ESP_FAIL;
+            }
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -355,6 +413,10 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 5, 0);
+            if (!wait_feedback_then_next(ids[i], i, n)) {
+                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
+                return ESP_FAIL;
+            }
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -378,6 +440,10 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, kp, kd, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_set_gains(ids[i], kp, kd);
+            if (!wait_feedback_then_next(ids[i], i, n)) {
+                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
+                return ESP_FAIL;
+            }
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -399,6 +465,10 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, mode, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 1, (uint8_t)mode);
+            if (!wait_feedback_then_next(ids[i], i, n)) {
+                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
+                return ESP_FAIL;
+            }
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -425,6 +495,10 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
 
         for (int i = 0; i < n; ++i) {
             dispatch_mode(ids[i], (uint8_t)mode, pos, vel, tau, vlim, ratio);
+            if (!wait_feedback_then_next(ids[i], i, n)) {
+                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
+                return ESP_FAIL;
+            }
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();

@@ -144,5 +144,5 @@ void app_main(void)
     xTaskCreatePinnedToCore(task_safety, "safety", 3072, NULL, 18, NULL, tskNO_AFFINITY);
     xTaskCreatePinnedToCore(task_telemetry, "telemetry", 4096, NULL, 5, NULL, tskNO_AFFINITY);
 
-    can_manager_trigger_scan(MOTORBRIDGE_MIN_MOTOR_ID, cfg->max_motors);
+    ESP_LOGI(TAG, "startup scan disabled; use serial CLI 'scan <min> <max>' when needed");
 }

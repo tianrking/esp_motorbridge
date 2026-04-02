@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "config/app_config.h"
 #include "core/motor_manager.h"
@@ -249,4 +251,21 @@ int command_router_collect_seen_ids(int min_id, int max_id, uint8_t *out_ids, in
         }
     }
     return count;
+}
+
+bool command_router_wait_feedback(uint8_t id, int32_t timeout_ms)
+{
+    if (id < MOTORBRIDGE_MIN_MOTOR_ID || id > MOTORBRIDGE_MAX_MOTOR_ID || timeout_ms <= 0) {
+        return false;
+    }
+
+    int64_t start_seen = s_seen_us[id];
+    int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (esp_timer_get_time() < deadline_us) {
+        if (s_seen_us[id] > start_seen) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    return false;
 }
