@@ -203,13 +203,11 @@ void motor_manager_mark_offline_by_timeout(int64_t now_us, int32_t timeout_ms)
         motor_state_t *m = &s_motors[i];
         if (m->online && (now_us - m->last_seen_us > timeout_us)) {
             ESP_LOGW(TAG,
-                     "id=%u offline timeout (%" PRId64 "ms > %dms), force disable",
+                     "id=%u offline timeout (%" PRId64 "ms > %dms), mark offline only",
                      m->id,
                      (now_us - m->last_seen_us) / 1000,
                      timeout_ms);
             m->online = false;
-            m->mode = MOTOR_MODE_DISABLED;
-            m->enabled = false;
         }
     }
     xSemaphoreGive(s_lock);

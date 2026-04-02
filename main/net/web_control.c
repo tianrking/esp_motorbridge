@@ -21,7 +21,6 @@ static char s_last_query[256];
 static int64_t s_last_query_us = 0;
 static const int64_t WEB_DUPLICATE_GUARD_US = 800000;
 static const int INTER_ID_DELAY_MS = 10;
-static const int FEEDBACK_WAIT_MS = 80;
 
 static const char *INDEX_HTML =
     "<!doctype html><html><head><meta charset='utf-8'/>"
@@ -238,14 +237,9 @@ static void inter_id_delay(int idx, int total)
     }
 }
 
-static bool wait_feedback_then_next(uint8_t id, int idx, int total)
+static void pace_then_next(int idx, int total)
 {
-    bool got_feedback = command_router_wait_feedback(id, FEEDBACK_WAIT_MS);
-    if (!got_feedback) {
-        ESP_LOGW(TAG, "no feedback from id=%u within %dms, stop current batch", id, FEEDBACK_WAIT_MS);
-    }
     inter_id_delay(idx, total);
-    return got_feedback;
 }
 
 static void dispatch_set_gains(uint8_t id, float kp, float kd)
@@ -399,10 +393,7 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 4, 0);
-            if (!wait_feedback_then_next(ids[i], i, n)) {
-                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
-                return ESP_FAIL;
-            }
+            pace_then_next(i, n);
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -413,10 +404,7 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 5, 0);
-            if (!wait_feedback_then_next(ids[i], i, n)) {
-                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
-                return ESP_FAIL;
-            }
+            pace_then_next(i, n);
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -440,10 +428,7 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, 0, kp, kd, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_set_gains(ids[i], kp, kd);
-            if (!wait_feedback_then_next(ids[i], i, n)) {
-                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
-                return ESP_FAIL;
-            }
+            pace_then_next(i, n);
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -465,10 +450,7 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         log_action(action, ids, n, mode, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         for (int i = 0; i < n; ++i) {
             dispatch_admin(ids[i], 1, (uint8_t)mode);
-            if (!wait_feedback_then_next(ids[i], i, n)) {
-                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
-                return ESP_FAIL;
-            }
+            pace_then_next(i, n);
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
@@ -495,10 +477,7 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
 
         for (int i = 0; i < n; ++i) {
             dispatch_mode(ids[i], (uint8_t)mode, pos, vel, tau, vlim, ratio);
-            if (!wait_feedback_then_next(ids[i], i, n)) {
-                snprintf(resp, resp_len, "err no feedback id=%u", ids[i]);
-                return ESP_FAIL;
-            }
+            pace_then_next(i, n);
         }
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();

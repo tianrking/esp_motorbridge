@@ -24,10 +24,6 @@ static void control_one(motor_state_t *m, void *ctx)
     if (!m->enabled || m->mode == MOTOR_MODE_DISABLED) {
         return;
     }
-    // Pace by feedback: if no recent motor/CAN feedback, stop streaming control frames.
-    if (!can_manager_recent_rx(300)) {
-        return;
-    }
 
     const int64_t now_us = esp_timer_get_time();
     const int64_t min_interval_us = (int64_t)cfg->min_tx_interval_ms * 1000;

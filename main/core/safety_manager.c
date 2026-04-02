@@ -1,13 +1,16 @@
 #include "safety_manager.h"
 
-#include "esp_timer.h"
+#include "esp_log.h"
 
-#include "config/app_config.h"
-#include "core/motor_manager.h"
+static const char *TAG = "safety_manager";
+static bool s_logged_disabled = false;
 
 void safety_manager_tick(void)
 {
-    const app_config_t *cfg = app_config_get();
-    int64_t now_us = esp_timer_get_time();
-    motor_manager_mark_offline_by_timeout(now_us, cfg->offline_timeout_ms);
+    // User policy: do not auto-disable/mark-offline motors based on feedback timeout.
+    // Keep safety task alive for future checks (over-temp, range, etc.), but timeout check is disabled.
+    if (!s_logged_disabled) {
+        ESP_LOGW(TAG, "offline timeout safety check disabled");
+        s_logged_disabled = true;
+    }
 }
