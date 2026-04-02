@@ -1,0 +1,88 @@
+menu "MotorBridge Configuration"
+
+config MOTORBRIDGE_MAX_MOTORS
+    int "Max motor count"
+    range 1 32
+    default 7
+
+config MOTORBRIDGE_DEFAULT_MOTOR_ID
+    int "Default motor ID"
+    range 1 32
+    default 1
+
+config MOTORBRIDGE_DEFAULT_FEEDBACK_ID
+    int "Default feedback ID"
+    range 1 32
+    default 1
+
+config MOTORBRIDGE_CAN_BITRATE
+    int "CAN bitrate (bps)"
+    default 1000000
+
+config MOTORBRIDGE_CAN_TX_GPIO
+    int "CAN TX GPIO"
+    default 5 if IDF_TARGET_ESP32
+    default 7 if IDF_TARGET_ESP32S3
+    default 5
+
+config MOTORBRIDGE_CAN_RX_GPIO
+    int "CAN RX GPIO"
+    default 4 if IDF_TARGET_ESP32
+    default 6 if IDF_TARGET_ESP32S3
+    default 4
+
+config MOTORBRIDGE_CONTROL_PERIOD_MS
+    int "Control loop period (ms)"
+    range 1 20
+    default 5
+
+config MOTORBRIDGE_MIN_TX_INTERVAL_MS
+    int "Min control TX interval per motor (ms)"
+    range 1 50
+    default 10
+
+config MOTORBRIDGE_DEFAULT_KP_X100
+    int "Default Kp x100 (e.g. 50 means 0.50)"
+    range 0 50000
+    default 50
+
+config MOTORBRIDGE_DEFAULT_KD_X1000
+    int "Default Kd x1000 (e.g. 80 means 0.080)"
+    range 0 5000
+    default 80
+
+config MOTORBRIDGE_OFFLINE_TIMEOUT_MS
+    int "Motor offline timeout (ms)"
+    range 100 10000
+    default 3000
+
+config MOTORBRIDGE_LOG_PERIOD_MS
+    int "Telemetry log period (ms)"
+    range 50 5000
+    default 500
+
+config MOTORBRIDGE_ENABLE_WIFI_UDP
+    bool "Enable WiFi UDP bridge"
+    default y
+
+config MOTORBRIDGE_WIFI_SSID
+    string "WiFi AP SSID"
+    default "ESP_motorbridge"
+    depends on MOTORBRIDGE_ENABLE_WIFI_UDP
+
+config MOTORBRIDGE_WIFI_PASSWORD
+    string "WiFi AP password"
+    default "12345678"
+    depends on MOTORBRIDGE_ENABLE_WIFI_UDP
+
+config MOTORBRIDGE_APPLY_DEFAULT_ID_MAP_AT_BOOT
+    bool "Apply default Damiao ID map at boot"
+    default y
+
+config MOTORBRIDGE_UDP_PORT
+    int "UDP control port"
+    range 1024 65535
+    default 9000
+    depends on MOTORBRIDGE_ENABLE_WIFI_UDP
+
+endmenu

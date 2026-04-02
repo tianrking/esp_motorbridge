@@ -1,0 +1,28 @@
+idf_component_register(
+    SRCS
+        "app/app_main.c"
+        "app/command_router.c"
+        "app/serial_cli.c"
+        "config/app_config.c"
+        "core/control_loop.c"
+        "core/motor_manager.c"
+        "core/safety_manager.c"
+        "net/wifi_udp_bridge.c"
+        "net/web_control.c"
+        "storage/param_store.c"
+        "transport/can_manager.c"
+        "protocol/host_protocol.c"
+        "vendors/damiao/damiao_protocol.c"
+        "vendors/damiao/damiao_vendor.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_event
+        esp_http_server
+        esp_netif
+        esp_timer
+        esp_wifi
+        lwip
+        nvs_flash
+)

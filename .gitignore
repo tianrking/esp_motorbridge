@@ -1,0 +1,19 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.*.old
+
+# CMake / Ninja artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.ninja
+
+# Editor / OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
