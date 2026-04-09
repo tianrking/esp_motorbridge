@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 
 #include "core/motor_manager.h"
+#include "transport/can_manager.h"
 #include "vendors/motor_vendor.h"
 
 static void task_scan(void *arg)
@@ -22,7 +23,7 @@ static void task_scan(void *arg)
             if (motor_manager_get_state(id, &m) && m.vendor != NULL && m.vendor->build_scan_request != NULL) {
                 twai_message_t msg;
                 m.vendor->build_scan_request((uint8_t)id, &msg);
-                (void)twai_transmit(&msg, pdMS_TO_TICKS(8));
+                (void)can_manager_send(&msg, 8);
                 vTaskDelay(pdMS_TO_TICKS(2));
             }
         }

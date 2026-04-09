@@ -78,7 +78,7 @@ esp_err_t web_control_execute_action_from_query(const char *query, char *resp, s
         return err;
     }
 
-    if (strcmp(action, "state_all") == 0) {
+    if (strcmp(action, "state_all") == 0 || strcmp(action, "state_delta") == 0) {
         const app_config_t *cfg = app_config_get();
         err = web_actions_handle_motor(action, query, NULL, 0, cfg->max_motors, resp, resp_len, &handled);
         if (handled && err == ESP_OK) {

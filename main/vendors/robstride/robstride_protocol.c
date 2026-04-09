@@ -1,6 +1,9 @@
 #include "vendors/robstride/robstride_protocol.h"
 #include <string.h>
 
+#include "esp_log.h"
+#include "esp_timer.h"
+
 #define RS_COMM_GET_DEVID 0
 #define RS_COMM_CONTROL   1
 #define RS_COMM_STATUS    2
@@ -8,6 +11,8 @@
 #define RS_COMM_DISABLE   4
 #define RS_COMM_SET_ZERO  6
 #define RS_COMM_CLEAR_ERR 4 // Fallback to disable on clear error
+static const char *TAG = "robstride_proto";
+static int64_t s_last_mode_warn_us = 0;
 
 static uint32_t build_ext_id(uint32_t comm, uint16_t extra, uint8_t id) {
     return (comm << 24) | (((uint32_t)extra) << 8) | ((uint32_t)id);
@@ -49,7 +54,14 @@ static float clampf(float v, float min, float max) {
 bool robstride_build_control_frame(uint8_t id, motor_mode_t mode, const damiao_cmd_t *cmd, const motor_params_t *params, twai_message_t *out_msg) {
     if (!out_msg || !cmd || !params) return false;
     // RS only supports MIT mode via main control frame in this sdk
-    if (mode != MOTOR_MODE_MIT) return false; 
+    if (mode != MOTOR_MODE_MIT) {
+        int64_t now = esp_timer_get_time();
+        if ((now - s_last_mode_warn_us) > 1000000LL) {
+            ESP_LOGW(TAG, "unsupported mode=%d for id=%u, only MIT is supported", (int)mode, (unsigned int)id);
+            s_last_mode_warn_us = now;
+        }
+        return false;
+    }
     
     float pmax = params->p_max > 0.0f ? params->p_max : 12.5f; 
     float vmax = params->v_max > 0.0f ? params->v_max : 10.0f;

@@ -99,7 +99,8 @@ void command_router_apply_set_ids(uint8_t old_id, uint8_t new_motor_id, uint8_t 
 
     if (store_after_set) {
         twai_message_t tx;
-        damiao_build_store_params_cmd(new_motor_id, &tx);
+        // Store must be sent to the currently-addressable node (old ID) before remap fully takes effect.
+        damiao_build_store_params_cmd(old_id, &tx);
         (void)can_manager_send(&tx, 10);
     }
 

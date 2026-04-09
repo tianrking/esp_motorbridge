@@ -15,19 +15,33 @@ bool damiao_parse_feedback(const twai_message_t *msg,
         return false;
     }
 
-    if (msg->identifier == MOTORBRIDGE_HOST_ADMIN_ID) {
+    // Damiao feedback uses standard data frame with 8-byte payload.
+    if (msg->extd || msg->rtr || msg->identifier == MOTORBRIDGE_HOST_ADMIN_ID) {
+        return false;
+    }
+    // Register read/write/store and other maintenance traffic (0x7FF) must not be treated as feedback.
+    if (msg->identifier == 0x7FF || msg->identifier > MOTORBRIDGE_MAX_MOTOR_ID) {
         return false;
     }
 
-    uint8_t can_id = msg->data[0] & 0x0F;
+    uint8_t packed_low_id = msg->data[0] & 0x0F;
     uint8_t st = msg->data[0] >> 4;
+    uint8_t arb_id = (uint8_t)msg->identifier;
+    if (arb_id == 0 || arb_id > MOTORBRIDGE_MAX_MOTOR_ID) {
+        return false;
+    }
+    // Keep low-nibble consistency check for 1..15 IDs to avoid false positives,
+    // but don't truncate logical motor ID to 4 bits (system supports up to 127).
+    if (arb_id <= 15 && packed_low_id != arb_id) {
+        return false;
+    }
 
     uint32_t pos_i = ((uint32_t)msg->data[1] << 8) | (uint32_t)msg->data[2];
     uint32_t vel_i = ((uint32_t)msg->data[3] << 4) | ((uint32_t)msg->data[4] >> 4);
     uint32_t torq_i = (((uint32_t)msg->data[4] & 0x0F) << 8) | (uint32_t)msg->data[5];
 
     if (id != NULL) {
-        *id = can_id;
+        *id = arb_id;
     }
     if (status != NULL) {
         *status = st;
@@ -48,5 +62,5 @@ bool damiao_parse_feedback(const twai_message_t *msg,
         *t_rotor = (float)msg->data[7];
     }
 
-    return can_id > 0;
+    return true;
 }

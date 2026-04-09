@@ -1,11 +1,49 @@
 #include "transport/can_manager_internal.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+static int s_busoff_level = 0;
+static int64_t s_next_recover_attempt_us = 0;
+static int64_t s_last_recovery_log_us = 0;
+static uint32_t s_recovery_log_suppressed = 0;
+
+static int32_t recovery_backoff_ms_for_level(int level)
+{
+    if (level < 0) {
+        level = 0;
+    }
+    int32_t ms = 120;
+    while (level-- > 0 && ms < 2000) {
+        ms <<= 1;
+    }
+    return (ms > 2000) ? 2000 : ms;
+}
+
+static void maybe_log_recovery(const char *fmt, ...)
+{
+    const int64_t now = esp_timer_get_time();
+    if ((now - s_last_recovery_log_us) < 1000000LL) {
+        s_recovery_log_suppressed++;
+        return;
+    }
+
+    if (s_recovery_log_suppressed > 0) {
+        ESP_LOGW(g_can_manager_tag, "recovery log suppressed=%" PRIu32, s_recovery_log_suppressed);
+        s_recovery_log_suppressed = 0;
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    esp_log_writev(ESP_LOG_WARN, g_can_manager_tag, fmt, ap);
+    va_end(ap);
+    s_last_recovery_log_us = now;
+}
 
 void can_manager_tx_backoff_ms(int32_t ms)
 {
@@ -24,7 +62,7 @@ void can_manager_maybe_log_twai_status(const twai_status_info_t *st, bool force)
         return;
     }
     const int64_t now = esp_timer_get_time();
-    if (force || (now - g_last_status_log_us) > 300000) {
+    if (force || (now - g_last_status_log_us) > 1000000) {
         ESP_LOGW(g_can_manager_tag,
                  "twai status: state=%d txq=%" PRIu32 " rxq=%" PRIu32
                  " tec=%" PRIu32 " rec=%" PRIu32 " tx_failed=%" PRIu32 " bus_err=%" PRIu32,
@@ -52,32 +90,44 @@ void can_manager_try_recover_on_timeout(void)
     }
 
     if (st.state == TWAI_STATE_BUS_OFF && !g_recovery_in_progress) {
+        const int64_t now = esp_timer_get_time();
+        if (now < s_next_recover_attempt_us) {
+            return;
+        }
+
         if (twai_initiate_recovery() == ESP_OK) {
             g_recovery_in_progress = true;
-            g_recovery_start_us = esp_timer_get_time();
-            ESP_LOGW(g_can_manager_tag, "TWAI bus-off: recovery initiated");
-            can_manager_tx_backoff_ms(120);
+            g_recovery_start_us = now;
+            int32_t backoff_ms = recovery_backoff_ms_for_level(s_busoff_level);
+            s_next_recover_attempt_us = now + (int64_t)backoff_ms * 1000;
+            maybe_log_recovery("TWAI bus-off: recovery initiated level=%d backoff=%dms", s_busoff_level, (int)backoff_ms);
+            can_manager_tx_backoff_ms(backoff_ms);
         }
     } else if (st.state == TWAI_STATE_BUS_OFF && g_recovery_in_progress) {
         const int64_t now = esp_timer_get_time();
-        if ((now - g_recovery_start_us) > 600000 && (now - g_last_busoff_reset_us) > 1000000) {
+        if ((now - g_recovery_start_us) > 600000 && (now - g_last_busoff_reset_us) > 1000000 && now >= s_next_recover_attempt_us) {
             g_last_busoff_reset_us = now;
-            ESP_LOGW(g_can_manager_tag, "bus-off recovery timeout, force stop/start");
+            maybe_log_recovery("bus-off recovery timeout, force stop/start level=%d", s_busoff_level);
             (void)twai_clear_transmit_queue();
             (void)twai_stop();
             vTaskDelay(pdMS_TO_TICKS(30));
             (void)twai_start();
             g_recovery_in_progress = false;
-            can_manager_tx_backoff_ms(220);
+            s_busoff_level = (s_busoff_level < 6) ? (s_busoff_level + 1) : 6;
+            int32_t backoff_ms = recovery_backoff_ms_for_level(s_busoff_level);
+            s_next_recover_attempt_us = now + (int64_t)backoff_ms * 1000;
+            can_manager_tx_backoff_ms(backoff_ms);
         }
     } else if (st.state == TWAI_STATE_STOPPED) {
         if (twai_start() == ESP_OK) {
-            ESP_LOGW(g_can_manager_tag, "TWAI was stopped, restarted");
+            maybe_log_recovery("TWAI was stopped, restarted");
             can_manager_tx_backoff_ms(80);
         }
     } else if (st.state == TWAI_STATE_RUNNING) {
         g_recovery_in_progress = false;
         g_recovery_start_us = 0;
+        s_busoff_level = 0;
+        s_next_recover_attempt_us = 0;
     }
 }
 

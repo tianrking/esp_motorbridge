@@ -75,6 +75,7 @@ static void task_telemetry(void *arg)
 {
     const app_config_t *cfg = app_config_get();
     while (1) {
+        motor_manager_for_each(log_motor_cb, NULL);
         vTaskDelay(pdMS_TO_TICKS(cfg->log_period_ms));
     }
 }
