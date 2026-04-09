@@ -2,16 +2,17 @@
 
 #include <stdint.h>
 
-#include "driver/twai.h"
-#include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
-#include "app/command_router.h"
 #include "config/app_config.h"
 #include "core/motor_manager.h"
 
 static const char *TAG = "safety_manager";
 static bool s_offline_estop_latched = false;
+// Burn-in policy: keep running even when some motors timeout.
+static const bool s_offline_estop_enabled = false;
+static bool s_logged_estop_disabled = false;
 
 typedef struct {
     int64_t now_us;
@@ -26,23 +27,16 @@ static void collect_stale_cb(motor_state_t *m, void *ctx)
     if (m == NULL || c == NULL || !m->online || m->last_seen_us <= 0) {
         return;
     }
+    // Only "participating" motors are considered for offline protection.
+    if (!m->enabled || m->mode == MOTOR_MODE_DISABLED) {
+        return;
+    }
     int64_t age_us = c->now_us - m->last_seen_us;
     if (age_us > ((int64_t)c->timeout_ms * 1000LL)) {
         if (c->count < (int)(sizeof(c->ids) / sizeof(c->ids[0]))) {
             c->ids[c->count++] = m->id;
         }
     }
-}
-
-static void send_estop_all(void)
-{
-    twai_message_t msg = {0};
-    msg.identifier = MOTORBRIDGE_HOST_ADMIN_ID;
-    msg.data_length_code = 8;
-    msg.data[0] = 2; // HOST_OP_ESTOP
-    msg.data[1] = 0;
-    msg.data[2] = 0;
-    command_router_handle_can_rx(&msg);
 }
 
 void safety_manager_tick(void)
@@ -58,15 +52,19 @@ void safety_manager_tick(void)
     };
     motor_manager_for_each(collect_stale_cb, &stale);
 
-    if (stale.count > 0) {
+    if (stale.count > 0 && s_offline_estop_enabled) {
         if (!s_offline_estop_latched) {
-            send_estop_all();
             s_offline_estop_latched = true;
             ESP_LOGW(TAG, "offline protection triggered, E-STOP ALL (offline_count=%d)", stale.count);
         }
     } else if (s_offline_estop_latched) {
         s_offline_estop_latched = false;
         ESP_LOGI(TAG, "offline protection latch cleared");
+    }
+
+    if (!s_offline_estop_enabled && !s_logged_estop_disabled) {
+        ESP_LOGW(TAG, "offline E-STOP disabled for burn-in; timeout only marks offline");
+        s_logged_estop_disabled = true;
     }
 
     motor_manager_mark_offline_by_timeout(stale.now_us, stale.timeout_ms);
