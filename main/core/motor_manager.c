@@ -8,6 +8,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "vendors/motor_vendor.h"
+
 static motor_state_t s_motors[MOTORBRIDGE_MAX_MOTOR_ID + 1];
 static int s_max_motors = 0;
 static SemaphoreHandle_t s_lock;
@@ -51,6 +53,7 @@ void motor_manager_init(int max_motors)
         m->id = (uint8_t)i;
         m->mode = MOTOR_MODE_DISABLED;
         m->enabled = false;
+        m->vendor = NULL;
         m->cmd.ratio = 0.1f;
         init_default_params(&m->params);
     }
@@ -59,6 +62,23 @@ void motor_manager_init(int max_motors)
 int motor_manager_count(void)
 {
     return s_max_motors;
+}
+
+bool motor_manager_set_vendor(uint8_t id, const char *vendor_name)
+{
+    if (!valid_id(id)) {
+        return false;
+    }
+    const motor_vendor_ops_t *vendor = motor_vendor_get(vendor_name);
+    if (vendor == NULL) {
+        ESP_LOGE(TAG, "Unknown motor vendor: %s", vendor_name);
+        return false;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_motors[id].vendor = vendor;
+    xSemaphoreGive(s_lock);
+    return true;
 }
 
 bool motor_manager_set_mode(uint8_t id, motor_mode_t mode)
@@ -79,9 +99,8 @@ bool motor_manager_set_enabled(uint8_t id, bool enabled)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_motors[id].enabled = enabled;
-    if (!enabled) {
-        s_motors[id].mode = MOTOR_MODE_DISABLED;
-    }
+    // Keep last mode while disabled, so a later enable can resume control intent.
+    // Hard stop semantics are handled by motor_manager_estop_all().
     xSemaphoreGive(s_lock);
     return true;
 }

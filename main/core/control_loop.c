@@ -18,10 +18,9 @@ static int64_t s_last_tx_us[MOTORBRIDGE_MAX_MOTOR_ID + 1];
 static void control_one(motor_state_t *m, void *ctx)
 {
     (void)ctx;
-    const motor_vendor_ops_t *vendor = motor_vendor_active();
     const app_config_t *cfg = app_config_get();
 
-    if (!m->enabled || m->mode == MOTOR_MODE_DISABLED) {
+    if (!m->enabled || m->mode == MOTOR_MODE_DISABLED || m->vendor == NULL) {
         return;
     }
 
@@ -31,10 +30,12 @@ static void control_one(motor_state_t *m, void *ctx)
         return;
     }
 
-    twai_message_t tx;
-    if (vendor->build_control_frame(m->id, m->mode, &m->cmd, &m->params, &tx)) {
-        (void)can_manager_send(&tx, 8);
-        s_last_tx_us[m->id] = now_us;
+    if (m->vendor->build_control_frame != NULL) {
+        twai_message_t tx;
+        if (m->vendor->build_control_frame(m->id, m->mode, &m->cmd, &m->params, &tx)) {
+            (void)can_manager_send(&tx, 8);
+            s_last_tx_us[m->id] = now_us;
+        }
     }
 }
 

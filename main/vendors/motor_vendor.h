@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct motor_vendor_ops_s {
     const char *name;
     void (*build_scan_request)(uint8_t id, twai_message_t *out_msg);
     void (*build_admin_frame)(uint8_t id, host_admin_opcode_t op, twai_message_t *out_msg);
@@ -31,7 +31,8 @@ typedef struct {
                            uint8_t *status);
 } motor_vendor_ops_t;
 
-const motor_vendor_ops_t *motor_vendor_active(void);
+void motor_vendor_registry_init(void);
+const motor_vendor_ops_t *motor_vendor_get(const char *name);
 
 #ifdef __cplusplus
 }

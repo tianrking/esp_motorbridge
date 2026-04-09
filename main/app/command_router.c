@@ -1,6 +1,7 @@
 #include "app/command_router.h"
 
 #include <inttypes.h>
+#include <string.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -25,12 +26,17 @@ static bool s_verify_pending = false;
 static uint8_t s_verify_expect_motor_id = 0;
 static uint8_t s_verify_expect_feedback_id = 0;
 static int64_t s_seen_us[MOTORBRIDGE_MAX_MOTOR_ID + 1];
+static uint8_t s_damiao_mode_written[MOTORBRIDGE_MAX_MOTOR_ID + 1];
+static int64_t s_damiao_mode_written_us[MOTORBRIDGE_MAX_MOTOR_ID + 1];
 
 static void send_admin_to_motor(uint8_t id, host_admin_opcode_t op)
 {
-    const motor_vendor_ops_t *vendor = motor_vendor_active();
+    motor_state_t m;
+    if (!motor_manager_get_state(id, &m) || m.vendor == NULL || m.vendor->build_admin_frame == NULL) {
+        return;
+    }
     twai_message_t tx;
-    vendor->build_admin_frame(id, op, &tx);
+    m.vendor->build_admin_frame(id, op, &tx);
     (void)can_manager_send(&tx, 10);
 }
 
@@ -53,6 +59,34 @@ static void send_damiao_store_params(uint8_t id)
     twai_message_t tx;
     damiao_build_store_params_cmd(id, &tx);
     (void)can_manager_send(&tx, 10);
+}
+
+static void ensure_damiao_ctrl_mode(uint8_t id, motor_mode_t mode)
+{
+    if (mode < MOTOR_MODE_MIT || mode > MOTOR_MODE_FORCE_POS) {
+        return;
+    }
+
+    motor_state_t m;
+    if (!motor_manager_get_state(id, &m) || m.vendor == NULL || m.vendor->name == NULL) {
+        return;
+    }
+    if (strcmp(m.vendor->name, "damiao") != 0) {
+        return;
+    }
+
+    const int64_t now = esp_timer_get_time();
+    const uint8_t desired = (uint8_t)mode;
+    const bool same_mode = s_damiao_mode_written[id] == desired;
+    const bool too_soon = (now - s_damiao_mode_written_us[id]) < 300000; // 300ms
+    if (same_mode && too_soon) {
+        return;
+    }
+
+    // Damiao control mode register: rid=10 (1=MIT,2=POS_VEL,3=VEL,4=FORCE_POS)
+    send_damiao_reg_write(id, 10, (uint32_t)desired);
+    s_damiao_mode_written[id] = desired;
+    s_damiao_mode_written_us[id] = now;
 }
 
 static void apply_set_ids(uint8_t old_id, uint8_t new_motor_id, uint8_t new_feedback_id, bool store_after_set, bool verify_after_set)
@@ -119,6 +153,7 @@ static void apply_admin_cmd(const host_admin_cmd_t *cmd)
         uint8_t id = (uint8_t)i;
         switch (cmd->op) {
         case HOST_OP_SET_MODE:
+            ensure_damiao_ctrl_mode(id, cmd->mode);
             (void)motor_manager_set_mode(id, cmd->mode);
             break;
         case HOST_OP_SET_GAINS:
@@ -149,6 +184,8 @@ static void apply_mode_cmd(uint8_t id, motor_mode_t mode, const damiao_cmd_t *cm
     if (cmd == NULL) {
         return;
     }
+
+    ensure_damiao_ctrl_mode(id, mode);
 
     switch (mode) {
     case MOTOR_MODE_MIT:
@@ -212,18 +249,24 @@ void command_router_handle_can_rx(const twai_message_t *msg)
         return;
     }
 
-    const motor_vendor_ops_t *vendor = motor_vendor_active();
-    float pos = 0.0f;
-    float vel = 0.0f;
-    float torque = 0.0f;
-    float t_mos = 0.0f;
-    float t_rotor = 0.0f;
+    float pos = 0, vel = 0, torque = 0, t_mos = 0, t_rotor = 0;
     uint8_t status = 0;
-    if (vendor->parse_feedback(msg, &id, &pos, &vel, &torque, &t_mos, &t_rotor, &status)) {
-        if (id >= MOTORBRIDGE_MIN_MOTOR_ID && id <= MOTORBRIDGE_MAX_MOTOR_ID) {
-            s_seen_us[id] = esp_timer_get_time();
+    uint8_t parsed_id = 0;
+
+    for (int i = MOTORBRIDGE_MIN_MOTOR_ID; i <= motor_manager_count(); ++i) {
+        motor_state_t m;
+        if (motor_manager_get_state((uint8_t)i, &m) && m.vendor != NULL && m.vendor->parse_feedback != NULL) {
+            if (m.vendor->parse_feedback(msg, &parsed_id, &pos, &vel, &torque, &t_mos, &t_rotor, &status)) {
+                if (parsed_id == i) {
+                    motor_manager_update_feedback(parsed_id, pos, vel, torque, t_mos, t_rotor, status);
+
+                    if (parsed_id < sizeof(s_seen_us)/sizeof(s_seen_us[0])) {
+                        s_seen_us[parsed_id] = esp_timer_get_time();
+                    }
+                    return;
+                }
+            }
         }
-        motor_manager_update_feedback(id, pos, vel, torque, t_mos, t_rotor, status);
     }
 }
 

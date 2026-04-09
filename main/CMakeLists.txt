@@ -12,8 +12,11 @@ idf_component_register(
         "storage/param_store.c"
         "transport/can_manager.c"
         "protocol/host_protocol.c"
+        "vendors/motor_vendor.c"
         "vendors/damiao/damiao_protocol.c"
         "vendors/damiao/damiao_vendor.c"
+        "vendors/robstride/robstride_protocol.c"
+        "vendors/robstride/robstride_vendor.c"
     INCLUDE_DIRS
         "."
     REQUIRES

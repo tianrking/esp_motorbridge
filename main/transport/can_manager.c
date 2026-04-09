@@ -23,6 +23,59 @@ static int64_t s_last_rx_us = 0;
 static int64_t s_last_qfull_log_us = 0;
 static int64_t s_last_hard_recover_us = 0;
 static int s_throttle_streak = 0;
+static int64_t s_tx_block_until_us = 0;
+static int64_t s_last_tx_fail_log_us = 0;
+static uint32_t s_tx_fail_suppressed = 0;
+static int64_t s_last_status_log_us = 0;
+static int64_t s_recovery_start_us = 0;
+static int64_t s_last_busoff_reset_us = 0;
+
+static void tx_backoff_ms(int32_t ms)
+{
+    if (ms <= 0) {
+        return;
+    }
+    int64_t until = esp_timer_get_time() + (int64_t)ms * 1000;
+    if (until > s_tx_block_until_us) {
+        s_tx_block_until_us = until;
+    }
+}
+
+static void maybe_log_tx_fail(uint32_t id, esp_err_t err)
+{
+    const int64_t now = esp_timer_get_time();
+    if ((now - s_last_tx_fail_log_us) > 200000) {
+        if (s_tx_fail_suppressed > 0) {
+            ESP_LOGW(TAG, "tx fail storm: suppressed=%" PRIu32, s_tx_fail_suppressed);
+            s_tx_fail_suppressed = 0;
+        }
+        ESP_LOGW(TAG, "tx failed id=0x%03" PRIX32 " err=0x%x", id, (unsigned int)err);
+        s_last_tx_fail_log_us = now;
+    } else {
+        s_tx_fail_suppressed++;
+    }
+}
+
+static void maybe_log_twai_status(const twai_status_info_t *st, bool force)
+{
+    if (st == NULL) {
+        return;
+    }
+    const int64_t now = esp_timer_get_time();
+    if (force || (now - s_last_status_log_us) > 300000) {
+        ESP_LOGW(TAG,
+                 "twai status: state=%d txq=%" PRIu32 " rxq=%" PRIu32
+                 " tec=%" PRIu32 " rec=%" PRIu32 " tx_failed=%" PRIu32 " bus_err=%" PRIu32,
+                 (int)st->state,
+                 st->msgs_to_tx,
+                 st->msgs_to_rx,
+                 st->tx_error_counter,
+                 st->rx_error_counter,
+                 st->tx_failed_count,
+                 st->bus_error_count);
+        s_last_status_log_us = now;
+    }
+}
 
 static void try_recover_on_timeout(void)
 {
@@ -30,17 +83,7 @@ static void try_recover_on_timeout(void)
     if (twai_get_status_info(&st) != ESP_OK) {
         return;
     }
-
-    ESP_LOGW(TAG,
-             "twai status: state=%d txq=%" PRIu32 " rxq=%" PRIu32
-             " tec=%" PRIu32 " rec=%" PRIu32 " tx_failed=%" PRIu32 " bus_err=%" PRIu32,
-             (int)st.state,
-             st.msgs_to_tx,
-             st.msgs_to_rx,
-             st.tx_error_counter,
-             st.rx_error_counter,
-             st.tx_failed_count,
-             st.bus_error_count);
+    maybe_log_twai_status(&st, false);
 
     if (st.msgs_to_tx > 0) {
         (void)twai_clear_transmit_queue();
@@ -49,14 +92,30 @@ static void try_recover_on_timeout(void)
     if (st.state == TWAI_STATE_BUS_OFF && !s_recovery_in_progress) {
         if (twai_initiate_recovery() == ESP_OK) {
             s_recovery_in_progress = true;
+            s_recovery_start_us = esp_timer_get_time();
             ESP_LOGW(TAG, "TWAI bus-off: recovery initiated");
+            tx_backoff_ms(120);
+        }
+    } else if (st.state == TWAI_STATE_BUS_OFF && s_recovery_in_progress) {
+        const int64_t now = esp_timer_get_time();
+        if ((now - s_recovery_start_us) > 600000 && (now - s_last_busoff_reset_us) > 1000000) {
+            s_last_busoff_reset_us = now;
+            ESP_LOGW(TAG, "bus-off recovery timeout, force stop/start");
+            (void)twai_clear_transmit_queue();
+            (void)twai_stop();
+            vTaskDelay(pdMS_TO_TICKS(30));
+            (void)twai_start();
+            s_recovery_in_progress = false;
+            tx_backoff_ms(220);
         }
     } else if (st.state == TWAI_STATE_STOPPED) {
         if (twai_start() == ESP_OK) {
             ESP_LOGW(TAG, "TWAI was stopped, restarted");
+            tx_backoff_ms(80);
         }
     } else if (st.state == TWAI_STATE_RUNNING) {
         s_recovery_in_progress = false;
+        s_recovery_start_us = 0;
     }
 }
 
@@ -88,6 +147,7 @@ static void try_hard_recover(const twai_status_info_t *st)
     vTaskDelay(pdMS_TO_TICKS(20));
     (void)twai_start();
     s_recovery_in_progress = false;
+    tx_backoff_ms(200);
 }
 
 static twai_timing_config_t timing_for_bitrate(int bitrate)
@@ -139,10 +199,11 @@ static void task_can_rx(void *arg)
     }
 }
 
+#include "core/motor_manager.h"
+
 static void task_scan(void *arg)
 {
     (void)arg;
-    const motor_vendor_ops_t *vendor = motor_vendor_active();
     while (1) {
         int64_t now = esp_timer_get_time();
         if (now >= s_scan_until_us) {
@@ -151,10 +212,13 @@ static void task_scan(void *arg)
         }
 
         for (int id = s_scan_min; id <= s_scan_max && esp_timer_get_time() < s_scan_until_us; ++id) {
-            twai_message_t msg;
-            vendor->build_scan_request((uint8_t)id, &msg);
-            (void)twai_transmit(&msg, pdMS_TO_TICKS(8));
-            vTaskDelay(pdMS_TO_TICKS(2));
+            motor_state_t m;
+            if (motor_manager_get_state(id, &m) && m.vendor != NULL && m.vendor->build_scan_request != NULL) {
+                twai_message_t msg;
+                m.vendor->build_scan_request((uint8_t)id, &msg);
+                (void)twai_transmit(&msg, pdMS_TO_TICKS(8));
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(80));
     }
@@ -210,7 +274,29 @@ esp_err_t can_manager_send(const twai_message_t *msg, int timeout_ms)
                  msg->data[7]);
     }
 
+    if (timeout_ms <= 0) {
+        timeout_ms = 1;
+    }
+
+    int64_t now_us = esp_timer_get_time();
+    if (now_us < s_tx_block_until_us) {
+        int32_t wait_ms = (int32_t)((s_tx_block_until_us - now_us + 999) / 1000);
+        if (wait_ms > timeout_ms) {
+            wait_ms = timeout_ms;
+        }
+        if (wait_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(wait_ms));
+        }
+    }
+
     twai_status_info_t st = {0};
+    if (twai_get_status_info(&st) == ESP_OK && st.state != TWAI_STATE_RUNNING) {
+        maybe_log_twai_status(&st, false);
+        try_recover_on_timeout();
+        tx_backoff_ms(60);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     int waited_ms = 0;
     while (twai_get_status_info(&st) == ESP_OK && st.msgs_to_tx >= 16 && waited_ms < timeout_ms) {
         int64_t now = esp_timer_get_time();
@@ -234,21 +320,42 @@ esp_err_t can_manager_send(const twai_message_t *msg, int timeout_ms)
             s_throttle_streak = 0;
         }
         try_hard_recover(&st);
+        tx_backoff_ms(60);
         return ESP_ERR_TIMEOUT;
     }
 
-    esp_err_t err = twai_transmit(msg, pdMS_TO_TICKS(timeout_ms));
-    if (err == ESP_ERR_TIMEOUT) {
-        // Retry once with a slightly longer wait to reduce transient queue/bus contention.
-        err = twai_transmit(msg, pdMS_TO_TICKS(timeout_ms + 6));
-        if (err == ESP_ERR_TIMEOUT) {
-            try_recover_on_timeout();
+    esp_err_t err = ESP_OK;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        err = twai_transmit(msg, pdMS_TO_TICKS(timeout_ms + (attempt * 4)));
+        if (err == ESP_OK) {
+            break;
         }
+
+        if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_INVALID_STATE) {
+            try_recover_on_timeout();
+            if (err == ESP_ERR_INVALID_STATE) {
+                twai_status_info_t st_now = {0};
+                if (twai_get_status_info(&st_now) == ESP_OK) {
+                    try_hard_recover(&st_now);
+                }
+                tx_backoff_ms(120);
+            }
+            if (attempt < 2) {
+                vTaskDelay(pdMS_TO_TICKS(3 + attempt * 3));
+                continue;
+            }
+        }
+        break;
     }
+
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "tx failed id=0x%03" PRIX32 " err=0x%x", msg->identifier, (unsigned int)err);
+        maybe_log_tx_fail(msg->identifier, err);
     } else {
         s_throttle_streak = 0;
+        if (s_tx_fail_suppressed > 0 && (esp_timer_get_time() - s_last_tx_fail_log_us) > 500000) {
+            ESP_LOGI(TAG, "tx recovered after suppressing %" PRIu32 " fail logs", s_tx_fail_suppressed);
+            s_tx_fail_suppressed = 0;
+        }
     }
     return err;
 }

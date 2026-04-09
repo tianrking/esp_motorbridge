@@ -5,6 +5,9 @@
 
 #include "config/app_config.h"
 
+struct motor_vendor_ops_s;
+typedef struct motor_vendor_ops_s motor_vendor_ops_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,10 +45,13 @@ typedef struct {
     uint8_t status;
     int64_t last_seen_us;
     motor_params_t params;
+    const motor_vendor_ops_t *vendor;
 } motor_state_t;
 
 void motor_manager_init(int max_motors);
 int motor_manager_count(void);
+
+bool motor_manager_set_vendor(uint8_t id, const char *vendor_name);
 
 bool motor_manager_set_mode(uint8_t id, motor_mode_t mode);
 bool motor_manager_set_enabled(uint8_t id, bool enabled);

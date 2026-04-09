@@ -80,7 +80,9 @@ static void send_admin_cmd(uint8_t op, uint8_t motor_id, uint8_t mode)
     msg.data[0] = op;
     msg.data[1] = motor_id;
     msg.data[2] = mode;
-    (void)can_manager_send(&msg, 10);
+    // Route host-style admin cmd locally so command_router can translate it
+    // into the bound vendor protocol frame for each motor.
+    command_router_handle_can_rx(&msg);
 }
 
 static int parse_int(const char *s, int def)
@@ -95,7 +97,7 @@ static void print_help(void)
 {
     ESP_LOGI(TAG, "commands:");
     ESP_LOGI(TAG, "  help");
-    ESP_LOGI(TAG, "  scan <min_id> <max_id>      e.g. scan 1 10");
+    ESP_LOGI(TAG, "  scan [vendor] <min_id> <max_id> e.g. scan robstride 1 10");
     ESP_LOGI(TAG, "  show                        list online motor ids");
     ESP_LOGI(TAG, "  candump <on|off>            print raw CAN RX frames");
     ESP_LOGI(TAG, "  enable <id|all>");
@@ -121,8 +123,22 @@ static void handle_line(char *line)
     }
 
     if (strcmp(cmd, "scan") == 0) {
-        int min_id = parse_int(strtok_r(NULL, " \t", &save), 1);
-        int max_id = parse_int(strtok_r(NULL, " \t", &save), 10);
+        char *arg1 = strtok_r(NULL, " \t", &save);
+        int min_id = 1;
+        int max_id = 10;
+        const char *vendor = NULL;
+
+        if (arg1 != NULL) {
+            if (strcmp(arg1, "damiao") == 0 || strcmp(arg1, "robstride") == 0) {
+                vendor = arg1;
+                min_id = parse_int(strtok_r(NULL, " \t", &save), 1);
+                max_id = parse_int(strtok_r(NULL, " \t", &save), 10);
+            } else {
+                min_id = parse_int(arg1, 1);
+                max_id = parse_int(strtok_r(NULL, " \t", &save), 10);
+            }
+        }
+
         if (min_id < MOTORBRIDGE_MIN_MOTOR_ID) {
             min_id = MOTORBRIDGE_MIN_MOTOR_ID;
         }
@@ -132,6 +148,16 @@ static void handle_line(char *line)
         if (min_id > max_id) {
             ESP_LOGW(TAG, "bad range: %d > %d", min_id, max_id);
             return;
+        }
+
+        if (vendor != NULL) {
+            int changed = 0;
+            for (int i = min_id; i <= max_id; ++i) {
+                if (motor_manager_set_vendor((uint8_t)i, vendor)) {
+                    changed++;
+                }
+            }
+            ESP_LOGI(TAG, "dynamically mapped %d slots to vendor '%s'", changed, vendor);
         }
 
         can_manager_trigger_scan(min_id, max_id);
@@ -230,6 +256,8 @@ static void task_serial_cli(void *arg)
         }
 
         if (ch == '\r' || ch == '\n') {
+            putchar('\n');
+            fflush(stdout);
             if (idx == 0) {
                 continue;
             }
@@ -244,6 +272,10 @@ static void task_serial_cli(void *arg)
             if (idx > 0) {
                 idx--;
                 line[idx] = '\0';
+                putchar('\b');
+                putchar(' ');
+                putchar('\b');
+                fflush(stdout);
             }
             continue;
         }
@@ -251,6 +283,8 @@ static void task_serial_cli(void *arg)
         if (idx + 1 < sizeof(line)) {
             line[idx++] = (char)ch;
             line[idx] = '\0';
+            putchar(ch);
+            fflush(stdout);
         }
     }
 }
