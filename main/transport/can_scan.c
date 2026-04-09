@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 
 #include "core/motor_manager.h"
+#include "vendors/motor_vendor.h"
 
 static void task_scan(void *arg)
 {

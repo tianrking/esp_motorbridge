@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -15,7 +16,7 @@ static httpd_handle_t s_server = NULL;
 static esp_err_t control_get_handler(httpd_req_t *req)
 {
     char query[256] = {0};
-    char resp[64] = {0};
+    char resp[1024] = {0};
 
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
@@ -35,7 +36,6 @@ static esp_err_t control_get_handler(httpd_req_t *req)
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        ESP_LOGI(TAG, "ws handshake complete");
         return ESP_OK;
     }
 
@@ -59,18 +59,39 @@ static esp_err_t ws_handler(httpd_req_t *req)
     }
     payload[frame.len] = '\0';
 
-    char resp[64] = {0};
-    (void)web_control_execute_action_from_query((char *)payload, resp, sizeof(resp));
+    char *resp = calloc(1, 1024);
+    if (resp == NULL) {
+        free(payload);
+        return ESP_ERR_NO_MEM;
+    }
+    (void)web_control_execute_action_from_query((char *)payload, resp, 1024);
+
+    char rid[24] = {0};
+    bool has_rid = (httpd_query_key_value((char *)payload, "rid", rid, sizeof(rid)) == ESP_OK);
     free(payload);
+
+    char *out_buf = calloc(1, 1200);
+    if (out_buf == NULL) {
+        free(resp);
+        return ESP_ERR_NO_MEM;
+    }
+    if (has_rid) {
+        snprintf(out_buf, 1200, "rid=%s;%s", rid, resp);
+    } else {
+        strlcpy(out_buf, resp, 1200);
+    }
+    free(resp);
 
     httpd_ws_frame_t out = {
         .final = true,
         .fragmented = false,
         .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)resp,
-        .len = strlen(resp),
+        .payload = (uint8_t *)out_buf,
+        .len = strlen(out_buf),
     };
-    return httpd_ws_send_frame(req, &out);
+    esp_err_t send_err = httpd_ws_send_frame(req, &out);
+    free(out_buf);
+    return send_err;
 }
 #endif
 
@@ -83,6 +104,7 @@ esp_err_t web_control_server_start(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 8;
     cfg.server_port = 80;
+    cfg.stack_size = 8192;
 
     ESP_LOGI(TAG, "starting web control http://192.168.4.1/");
     if (httpd_start(&s_server, &cfg) != ESP_OK) {

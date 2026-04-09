@@ -78,6 +78,15 @@ esp_err_t web_control_execute_action_from_query(const char *query, char *resp, s
         return err;
     }
 
+    if (strcmp(action, "state_all") == 0) {
+        const app_config_t *cfg = app_config_get();
+        err = web_actions_handle_motor(action, query, NULL, 0, cfg->max_motors, resp, resp_len, &handled);
+        if (handled && err == ESP_OK) {
+            remember_query(query);
+        }
+        return handled ? err : ESP_FAIL;
+    }
+
     if (httpd_query_key_value(query, "ids", ids_csv, sizeof(ids_csv)) != ESP_OK) {
         snprintf(resp, resp_len, "err missing ids");
         return ESP_FAIL;

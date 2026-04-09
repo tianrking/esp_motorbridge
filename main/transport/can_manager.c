@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+#include "config/app_config.h"
 #include "transport/can_manager_internal.h"
 
 const char *g_can_manager_tag = "can_manager";

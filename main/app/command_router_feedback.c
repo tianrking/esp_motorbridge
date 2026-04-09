@@ -2,6 +2,7 @@
 
 #include "core/motor_manager.h"
 #include "esp_timer.h"
+#include "vendors/motor_vendor.h"
 
 bool command_router_try_handle_feedback(const twai_message_t *msg)
 {

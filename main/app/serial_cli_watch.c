@@ -10,6 +10,7 @@
 #include "app/serial_cli_output.h"
 #include "core/motor_manager.h"
 #include "transport/can_manager.h"
+#include "vendors/motor_vendor.h"
 
 typedef struct {
     uint8_t ids[MOTORBRIDGE_MAX_MOTOR_ID + 1];

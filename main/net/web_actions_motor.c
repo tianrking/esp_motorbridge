@@ -9,6 +9,47 @@
 #include "core/motor_manager.h"
 #include "net/web_control_dispatch.h"
 
+typedef struct {
+    char *resp;
+    size_t cap;
+    size_t used;
+    int count;
+    int max_id;
+} state_all_ctx_t;
+
+static void append_state_item_cb(motor_state_t *m, void *ctx)
+{
+    state_all_ctx_t *c = (state_all_ctx_t *)ctx;
+    if (m == NULL || c == NULL || c->used >= c->cap) {
+        return;
+    }
+    if ((int)m->id > c->max_id) {
+        return;
+    }
+
+    int n = snprintf(c->resp + c->used,
+                     c->cap - c->used,
+                     "%sid=%u,online=%d,mode=%d,pos=%.5f,vel=%.5f,tau=%.5f",
+                     (c->count > 0) ? ";" : "",
+                     (unsigned int)m->id,
+                     m->online ? 1 : 0,
+                     (int)m->mode,
+                     m->position,
+                     m->speed,
+                     m->torque);
+    if (n <= 0) {
+        return;
+    }
+    size_t step = (size_t)n;
+    if (step >= (c->cap - c->used)) {
+        c->used = c->cap - 1;
+        c->resp[c->used] = '\0';
+        return;
+    }
+    c->used += step;
+    c->count++;
+}
+
 esp_err_t web_actions_handle_motor(const char *action,
                                    const char *query,
                                    const uint8_t *ids,
@@ -18,8 +59,27 @@ esp_err_t web_actions_handle_motor(const char *action,
                                    size_t resp_len,
                                    bool *handled)
 {
-    (void)max_id;
     *handled = false;
+
+    if (strcmp(action, "state_all") == 0) {
+        int hdr = snprintf(resp, resp_len, "ok state_all ");
+        if (hdr < 0 || (size_t)hdr >= resp_len) {
+            snprintf(resp, resp_len, "err state_all overflow");
+            *handled = true;
+            return ESP_FAIL;
+        }
+        state_all_ctx_t ctx = {
+            .resp = resp,
+            .cap = resp_len,
+            .used = (size_t)hdr,
+            .count = 0,
+            .max_id = max_id,
+        };
+        motor_manager_for_each(append_state_item_cb, &ctx);
+        snprintf(resp + ctx.used, resp_len - ctx.used, " (count=%d)", ctx.count);
+        *handled = true;
+        return ESP_OK;
+    }
 
     if (strcmp(action, "enable") == 0) {
         web_control_log_action(action, ids, n, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
