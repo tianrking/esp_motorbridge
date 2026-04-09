@@ -2,6 +2,10 @@
 
 #include "sdkconfig.h"
 
+#ifndef CONFIG_MOTORBRIDGE_APPLY_DEFAULT_ID_MAP_AT_BOOT
+#define CONFIG_MOTORBRIDGE_APPLY_DEFAULT_ID_MAP_AT_BOOT 0
+#endif
+
 static const app_config_t s_cfg = {
     .tx_gpio = CONFIG_MOTORBRIDGE_CAN_TX_GPIO,
     .rx_gpio = CONFIG_MOTORBRIDGE_CAN_RX_GPIO,

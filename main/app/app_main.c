@@ -109,9 +109,8 @@ static void apply_default_damiao_id_map(void)
 void app_main(void)
 {
     const app_config_t *cfg = app_config_get();
-    const motor_vendor_ops_t *vendor = motor_vendor_active();
 
-    ESP_LOGI(TAG, "MotorBridge startup vendor=%s", vendor->name);
+    ESP_LOGI(TAG, "MotorBridge startup multi-vendor");
     ESP_LOGI(TAG,
              "CAN tx=%d rx=%d bitrate=%d motors=%d ctrl_period=%dms tx_min=%dms offline_to=%dms default_kp=%.2f default_kd=%.3f",
              cfg->tx_gpio,
@@ -127,7 +126,14 @@ void app_main(void)
         ESP_LOGW(TAG, "offline timeout=%dms is shorter than typical Damiao feedback period", cfg->offline_timeout_ms);
     }
 
-    motor_manager_init(cfg->max_motors);
+    motor_manager_init(127);
+
+    for (int i = 1; i <= 7; ++i) {
+        motor_manager_set_vendor(i, "damiao");
+    }
+    for (int i = 8; i <= 127; ++i) {
+        motor_manager_set_vendor(i, "robstride");
+    }
 
     ESP_ERROR_CHECK(param_store_init());
     ESP_ERROR_CHECK(param_store_load_defaults_if_missing());
@@ -144,5 +150,5 @@ void app_main(void)
     xTaskCreatePinnedToCore(task_safety, "safety", 3072, NULL, 18, NULL, tskNO_AFFINITY);
     xTaskCreatePinnedToCore(task_telemetry, "telemetry", 4096, NULL, 5, NULL, tskNO_AFFINITY);
 
-    can_manager_trigger_scan(MOTORBRIDGE_MIN_MOTOR_ID, cfg->max_motors);
+    ESP_LOGI(TAG, "startup scan disabled; use serial CLI 'scan <min> <max>' when needed");
 }

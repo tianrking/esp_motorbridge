@@ -10,7 +10,7 @@ static const motor_vendor_ops_t s_damiao_ops = {
     .parse_feedback = damiao_parse_feedback,
 };
 
-const motor_vendor_ops_t *motor_vendor_active(void)
+const motor_vendor_ops_t *motor_vendor_get_damiao(void)
 {
     return &s_damiao_ops;
 }
