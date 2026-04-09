@@ -93,6 +93,19 @@ static void send_admin_cmd(uint8_t op, uint8_t motor_id, uint8_t mode)
     command_router_handle_can_rx(&msg);
 }
 
+static void send_set_id_cmd(uint8_t old_id, uint8_t new_id, bool store, bool verify)
+{
+    twai_message_t msg = {0};
+    msg.identifier = MOTORBRIDGE_HOST_ADMIN_ID;
+    msg.data_length_code = 8;
+    msg.data[0] = 9; // HOST_OP_SET_IDS
+    msg.data[1] = old_id;
+    msg.data[2] = new_id; // new motor id
+    msg.data[3] = new_id; // new feedback id
+    msg.data[4] = (store ? 0x01 : 0) | (verify ? 0x02 : 0);
+    command_router_handle_can_rx(&msg);
+}
+
 static int parse_int(const char *s, int def)
 {
     if (s == NULL || *s == '\0') {
@@ -116,6 +129,7 @@ static void print_help(void)
     ESP_LOGI(TAG, "  enable <id|all>");
     ESP_LOGI(TAG, "  disable <id|all>");
     ESP_LOGI(TAG, "  mode <id|all> <0..4>        1=MIT 2=PosVel 3=Vel 4=ForcePos");
+    ESP_LOGI(TAG, "  setid <old_id> <new_id>     Damiao only, store+verify");
 }
 
 typedef struct {
@@ -445,6 +459,39 @@ static void handle_line(char *line)
         }
         send_admin_cmd(1, (uint8_t)id, (uint8_t)mode);
         ESP_LOGI(TAG, "set mode=%d id=%d", mode, id);
+        return;
+    }
+    if (strcmp(cmd, "setid") == 0) {
+        int old_id = parse_int(strtok_r(NULL, " \t", &save), -1);
+        int new_id = parse_int(strtok_r(NULL, " \t", &save), -1);
+        if (old_id < MOTORBRIDGE_MIN_MOTOR_ID || old_id > motor_manager_count() ||
+            new_id < MOTORBRIDGE_MIN_MOTOR_ID || new_id > motor_manager_count() ||
+            old_id == new_id) {
+            ESP_LOGW(TAG, "usage: setid <old_id> <new_id>");
+            return;
+        }
+
+        motor_state_t old_m = {0};
+        if (!motor_manager_get_state((uint8_t)old_id, &old_m) ||
+            old_m.vendor == NULL ||
+            old_m.vendor->name == NULL ||
+            strcmp(old_m.vendor->name, "damiao") != 0) {
+            ESP_LOGW(TAG, "setid only supports damiao-mapped old_id");
+            return;
+        }
+        motor_state_t new_m = {0};
+        if (motor_manager_get_state((uint8_t)new_id, &new_m) && new_m.online) {
+            ESP_LOGW(TAG, "new_id=%d appears online; abort to avoid ID conflict", new_id);
+            return;
+        }
+
+        send_admin_cmd(5, (uint8_t)old_id, 0); // disable old before remap
+        vTaskDelay(pdMS_TO_TICKS(30));
+        send_set_id_cmd((uint8_t)old_id, (uint8_t)new_id, true, true);
+        vTaskDelay(pdMS_TO_TICKS(40));
+        (void)motor_manager_set_vendor((uint8_t)new_id, "damiao");
+        can_manager_trigger_scan(new_id, new_id);
+        ESP_LOGI(TAG, "setid requested old=%d -> new=%d (damiao, store+verify)", old_id, new_id);
         return;
     }
 

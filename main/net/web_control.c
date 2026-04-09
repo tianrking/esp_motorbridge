@@ -16,6 +16,8 @@
 #include "app/command_router.h"
 #include "config/app_config.h"
 #include "core/motor_manager.h"
+#include "transport/can_manager.h"
+#include "vendors/motor_vendor.h"
 
 static const char *TAG = "web_control";
 static httpd_handle_t s_server = NULL;
@@ -68,6 +70,11 @@ static const char *INDEX_HTML_TEMPLATE =
     "<button class='red democtl' onclick='demoStop()'>停止 Demo</button>"
     "<button class='gray democtl' onclick='demoReset()'>复位</button>"
     "<button class='red democtl' onclick='estopAll()'>E-Stop</button>"
+    "</div>"
+    "<div class='row'>"
+    "<input id='id_old' type='number' min='1' max='127' step='1' value='1'/>"
+    "<input id='id_new' type='number' min='1' max='127' step='1' value='2'/>"
+    "<button class='gray' onclick='setDamiaoId()'>改ID(Damiao)</button>"
     "</div></div>"
     "<div class='card'><h2>电机面板</h2><div id='motors' class='motors'></div><div id='global_msg' class='hint'></div></div>"
     "<script>"
@@ -122,6 +129,7 @@ static const char *INDEX_HTML_TEMPLATE =
     "async function demoStart(){const did=document.getElementById('demo_id').value;const r=await api({action:'demo_start',demo_id:did});showGlobal(r.ok,r.text);}"
     "async function demoStop(){const r=await api({action:'demo_stop'});showGlobal(r.ok,r.text);}"
     "async function demoReset(){const r=await api({action:'demo_reset'});showGlobal(r.ok,r.text);}"
+    "async function setDamiaoId(){const oldId=parseInt(document.getElementById('id_old').value||'0',10);const newId=parseInt(document.getElementById('id_new').value||'0',10);if(!oldId||!newId||oldId===newId){showGlobal(false,'bad id');return;}const r=await api({action:'set_id',id_old:String(oldId),id_new:String(newId)});showGlobal(r.ok,r.text);}"
     "</script></body></html>";
 
 static int16_t clamp_i16_from_f(float x, float scale)
@@ -246,6 +254,19 @@ static void dispatch_set_gains(uint8_t id, float kp, float kd)
     msg.data[3] = (uint8_t)((kp_u >> 8) & 0xFF);
     msg.data[4] = (uint8_t)(kd_u & 0xFF);
     msg.data[5] = (uint8_t)((kd_u >> 8) & 0xFF);
+    command_router_handle_can_rx(&msg);
+}
+
+static void dispatch_set_ids(uint8_t old_id, uint8_t new_id, bool store_after_set, bool verify_after_set)
+{
+    twai_message_t msg = {0};
+    msg.identifier = MOTORBRIDGE_HOST_ADMIN_ID;
+    msg.data_length_code = 8;
+    msg.data[0] = 9; // HOST_OP_SET_IDS
+    msg.data[1] = old_id;
+    msg.data[2] = new_id; // new motor id
+    msg.data[3] = new_id; // new feedback id
+    msg.data[4] = (store_after_set ? 0x01 : 0) | (verify_after_set ? 0x02 : 0);
     command_router_handle_can_rx(&msg);
 }
 
@@ -483,6 +504,51 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
         strlcpy(s_last_query, query, sizeof(s_last_query));
         s_last_query_us = esp_timer_get_time();
         snprintf(resp, resp_len, "ok demo reset count=%d", max_id);
+        return ESP_OK;
+    }
+    if (strcmp(action, "set_id") == 0) {
+        char old_s[8] = {0};
+        char new_s[8] = {0};
+        if (s_demo_running) {
+            snprintf(resp, resp_len, "err stop demo first");
+            return ESP_FAIL;
+        }
+        if (httpd_query_key_value(query, "id_old", old_s, sizeof(old_s)) != ESP_OK ||
+            httpd_query_key_value(query, "id_new", new_s, sizeof(new_s)) != ESP_OK) {
+            snprintf(resp, resp_len, "err missing id_old/id_new");
+            return ESP_FAIL;
+        }
+        int old_id = atoi(old_s);
+        int new_id = atoi(new_s);
+        if (old_id < MOTORBRIDGE_MIN_MOTOR_ID || old_id > motor_manager_count() ||
+            new_id < MOTORBRIDGE_MIN_MOTOR_ID || new_id > motor_manager_count() ||
+            old_id == new_id) {
+            snprintf(resp, resp_len, "err bad id");
+            return ESP_FAIL;
+        }
+        motor_state_t old_m = {0};
+        if (!motor_manager_get_state((uint8_t)old_id, &old_m) ||
+            old_m.vendor == NULL ||
+            old_m.vendor->name == NULL ||
+            strcmp(old_m.vendor->name, "damiao") != 0) {
+            snprintf(resp, resp_len, "err old id is not damiao");
+            return ESP_FAIL;
+        }
+        motor_state_t new_m = {0};
+        if (motor_manager_get_state((uint8_t)new_id, &new_m) && new_m.online) {
+            snprintf(resp, resp_len, "err new id online");
+            return ESP_FAIL;
+        }
+
+        dispatch_admin((uint8_t)old_id, 5, 0); // disable
+        vTaskDelay(pdMS_TO_TICKS(30));
+        dispatch_set_ids((uint8_t)old_id, (uint8_t)new_id, true, true);
+        vTaskDelay(pdMS_TO_TICKS(40));
+        (void)motor_manager_set_vendor((uint8_t)new_id, "damiao");
+        can_manager_trigger_scan(new_id, new_id);
+        strlcpy(s_last_query, query, sizeof(s_last_query));
+        s_last_query_us = esp_timer_get_time();
+        snprintf(resp, resp_len, "ok set_id %d->%d requested", old_id, new_id);
         return ESP_OK;
     }
     if (strcmp(action, "enable_all") == 0) {
