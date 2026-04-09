@@ -1,6 +1,7 @@
 #include "net/web_control.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,10 @@ static char s_last_query[256];
 static int64_t s_last_query_us = 0;
 static const int64_t WEB_DUPLICATE_GUARD_US = 800000;
 static const int INTER_ID_DELAY_MS = 10;
+static volatile bool s_demo_running = false;
+static volatile bool s_demo_stop_req = false;
+static volatile int s_demo_id = 0;
+static TaskHandle_t s_demo_task = NULL;
 
 static const char *INDEX_HTML_TEMPLATE =
     "<!doctype html><html><head><meta charset='utf-8'/>"
@@ -35,10 +40,13 @@ static const char *INDEX_HTML_TEMPLATE =
     "button{border:none;padding:8px 11px;border-radius:9px;background:#0f766e;color:#fff;font-weight:600;cursor:pointer}"
     "button.gray{background:#475569}button.red{background:#b91c1c}button.orange{background:#b45309}"
     "input,select{padding:7px;border-radius:8px;border:1px solid #cbd5e1;min-width:80px}"
+    ".democtl{padding:10px 14px !important;min-height:40px;font-size:15px;font-weight:700}"
+    "select.democtl{min-width:120px;background:#fff}"
     "input[type=range]{padding:0;min-width:180px;vertical-align:middle}"
     ".motors{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:10px}"
     ".motor{border:1px solid #e2e8f0;border-radius:10px;padding:10px;background:#fcfdff}"
     ".hint{font-size:12px;color:#64748b}.ok{color:#047857}.err{color:#b91c1c}.mhide{display:none}"
+    ".locked{opacity:.55;pointer-events:none;filter:grayscale(.2)}"
     "</style></head><body>"
     "<div class='card'><h1>ESP MotorBridge 控制台</h1>"
     "<div class='hint'>独立电机控制: 每台电机独立模式/参数/滑条。切模式默认走 disable->set_mode->enable。</div></div>"
@@ -46,13 +54,19 @@ static const char *INDEX_HTML_TEMPLATE =
     "<div class='row'>"
     "<button onclick='enableAll()'>Enable All</button>"
     "<button class='red' onclick='disableAll()'>Disable All</button>"
-    "<button class='red' onclick='estopAll()'>E-Stop</button>"
+    "</div>"
+    "<div class='row'>"
     "<select id='vendor'><option value='damiao'>Damiao</option><option value='robstride'>RobStride</option></select>"
     "<button class='gray' onclick='applyVendorAll()'>应用类型到全部电机</button>"
-    "<button class='orange' onclick='startRecord()'>开始录制</button>"
-    "<button class='gray' onclick='stopRecord()'>停止录制</button>"
-    "<button onclick='playRecord()'>播放序列</button>"
-    "<button class='red' onclick='clearRecord()'>清空序列</button>"
+    "</div>"
+    "<div class='row'>"
+    "<select id='demo_id' class='democtl'><option value='1'>Demo1</option><option value='2'>Demo2</option><option value='3'>Demo3</option></select>"
+    "<button class='orange democtl' onclick='demoStart()'>启动 Demo</button>"
+    "</div>"
+    "<div class='row'>"
+    "<button class='red democtl' onclick='demoStop()'>停止 Demo</button>"
+    "<button class='gray democtl' onclick='demoReset()'>复位</button>"
+    "<button class='red democtl' onclick='estopAll()'>E-Stop</button>"
     "</div></div>"
     "<div class='card'><h2>电机面板</h2><div id='motors' class='motors'></div><div id='global_msg' class='hint'></div></div>"
     "<script>"
@@ -61,8 +75,10 @@ static const char *INDEX_HTML_TEMPLATE =
     "const globalMsg=document.getElementById('global_msg');"
     "const allIds=Array.from({length:maxMotors},(_,i)=>i+1).join(',');"
     "const rtTimers={};"
-    "let recording=false;let recordStartMs=0;let actionSeq=[];"
+    "let demoBusy=false;"
     "function showGlobal(ok,t){globalMsg.className=ok?'hint ok':'hint err';globalMsg.textContent=t;}"
+    "function setPanelLocked(locked){const cards=document.querySelectorAll('.motor');cards.forEach(c=>c.classList.toggle('locked',locked));}"
+    "async function refreshDemoStatus(){const r=await api({action:'demo_status'});if(!r.ok)return;const m=(r.text||'').match(/running=(\\d)\\s+id=(\\d+)/);if(!m)return;const running=m[1]==='1';if(running!==demoBusy){demoBusy=running;setPanelLocked(running);showGlobal(true,running?`demo running(id=${m[2]}), 请先停止 demo 再手动控制`:\"demo stopped, 手动控制已恢复\");}}"
     "function showOne(id,ok,t){const e=document.getElementById(`msg_${id}`);if(!e)return;e.className=ok?'hint ok':'hint err';e.textContent=t;}"
     "function val(id,k){const e=document.getElementById(`${k}_${id}`);return e?e.value:'';}"
     "function modeVal(id){return parseInt(val(id,'mode')||'1',10);}"
@@ -86,10 +102,8 @@ static const char *INDEX_HTML_TEMPLATE =
     "if(rt&&rtWas)rt.checked=true;"
     "const ok=s1.ok&&s2.ok&&s3.ok&&s4.ok&&s5.ok;"
     "showOne(id,ok,ok?`mode=${mode} switched (hold pos=${holdPos.toFixed(3)})`:('switch failed: '+[s1,s2,s3,s4,s5].map(x=>x.text).join(' | ')));}"
-    "async function apply(id,fromReplay){const mode=modeVal(id);const vlim=parseFloat(val(id,'vlim')||'0');if((mode===2||mode===4)&&vlim<=0){showOne(id,false,'vlim must be > 0');return;}"
-    "const payload={action:'apply',ids:String(id),mode:String(mode),pos:val(id,'pos'),vel:val(id,'vel'),tau:val(id,'tau'),vlim:val(id,'vlim'),ratio:val(id,'ratio')};"
-    "const r=await api(payload);showOne(id,r.ok,r.text);"
-    "if(recording&&!fromReplay&&r.ok){actionSeq.push({dt:Date.now()-recordStartMs,id:id,mode:payload.mode,pos:payload.pos,vel:payload.vel,tau:payload.tau,vlim:payload.vlim,ratio:payload.ratio});showGlobal(true,`recording... frames=${actionSeq.length}`);}}"
+    "async function apply(id){const mode=modeVal(id);const vlim=parseFloat(val(id,'vlim')||'0');if((mode===2||mode===4)&&vlim<=0){showOne(id,false,'vlim must be > 0');return;}"
+    "const r=await api({action:'apply',ids:String(id),mode:String(mode),pos:val(id,'pos'),vel:val(id,'vel'),tau:val(id,'tau'),vlim:val(id,'vlim'),ratio:val(id,'ratio')});showOne(id,r.ok,r.text);}"
     "function scheduleRt(id){const rt=document.getElementById(`rt_${id}`);if(!rt||!rt.checked)return;clearTimeout(rtTimers[id]);rtTimers[id]=setTimeout(()=>apply(id),120);}"
     "function setShow(id,key,show){const e=document.getElementById(`${key}w_${id}`);if(!e)return;e.classList.toggle('mhide',!show);}"
     "function updateModeUi(id){const m=modeVal(id);const showPos=(m===1||m===2||m===4);setShow(id,'pos',showPos);setShow(id,'vel',m===1||m===3);setShow(id,'tau',m===1);setShow(id,'vlim',m===2||m===4);setShow(id,'ratio',m===4);const pr=document.getElementById(`posr_${id}`);if(pr)pr.classList.toggle('mhide',!showPos);const h=document.getElementById(`mh_${id}`);if(h){h.textContent=m===1?'MIT: pos/vel/tau + gains':(m===2?'PosVel: pos/vlim':(m===3?'Vel: vel':'ForcePos: pos/vlim/ratio'));}}"
@@ -98,15 +112,14 @@ static const char *INDEX_HTML_TEMPLATE =
     "['vel','tau','vlim','ratio'].forEach(k=>{const e=document.getElementById(`${k}_${id}`);if(e)e.addEventListener('input',()=>scheduleRt(id));});updateModeUi(id);}"
     "function motorCard(id){return `<div class='motor'><div class='row'><h3>M${id}</h3><button onclick='doAction(${id},\"enable\")'>Enable</button><button class='red' onclick='doAction(${id},\"disable\")'>Disable</button><button class='gray' onclick='setModeSafe(${id})'>切模式(安全)</button></div><div class='row'><label>mode <select id='mode_${id}'><option value='1'>MIT</option><option value='2'>PosVel</option><option value='3'>Vel</option><option value='4'>ForcePos</option></select></label><label>kp <input id='kp_${id}' type='number' step='0.01' value='0.5'></label><label>kd <input id='kd_${id}' type='number' step='0.001' value='0.08'></label><button class='gray' onclick='setGains(${id})'>Gains</button></div><div class='row'><label id='posw_${id}'>pos <input id='pos_${id}' type='number' step='0.001' value='0'></label><input id='posr_${id}' type='range' min='-3.14' max='3.14' step='0.001' value='0'><label id='velw_${id}'>vel <input id='vel_${id}' type='number' step='0.01' value='0'></label><label id='tauw_${id}'>tau <input id='tau_${id}' type='number' step='0.01' value='0.3'></label><label id='vlimw_${id}'>vlim <input id='vlim_${id}' type='number' step='0.01' value='1'></label><label id='ratiow_${id}'>ratio <input id='ratio_${id}' type='number' step='0.0001' value='0.1'></label><label><input id='rt_${id}' type='checkbox' checked>实时</label><button class='orange' onclick='apply(${id})'>Apply</button></div><div id='mh_${id}' class='hint'></div><div id='msg_${id}' class='hint'>ready</div></div>`;}"
     "for(let i=1;i<=maxMotors;i++){motors.insertAdjacentHTML('beforeend',motorCard(i));bindCard(i);}"
+    "setInterval(refreshDemoStatus,500);refreshDemoStatus();"
     "async function enableAll(){const r=await api({action:'enable_all'});showGlobal(r.ok,r.text);}"
     "async function disableAll(){const r=await api({action:'disable_all'});showGlobal(r.ok,r.text);}"
     "async function estopAll(){const r=await api({action:'estop',ids:allIds});showGlobal(r.ok,r.text);}"
     "async function applyVendorAll(){const r=await api({action:'set_vendor',ids:allIds,vendor:document.getElementById('vendor').value});showGlobal(r.ok,r.text);}"
-    "function startRecord(){recording=true;recordStartMs=Date.now();actionSeq=[];showGlobal(true,'record started');}"
-    "function stopRecord(){recording=false;showGlobal(true,`record stopped frames=${actionSeq.length}`);}"
-    "function clearRecord(){recording=false;actionSeq=[];showGlobal(true,'record cleared');}"
-    "function setModeInput(id,m){const e=document.getElementById(`mode_${id}`);if(e)e.value=String(m);updateModeUi(id);}"
-    "async function playRecord(){if(actionSeq.length===0){showGlobal(false,'record is empty');return;}recording=false;showGlobal(true,`playing ${actionSeq.length} frames`);let prev=0;for(const f of actionSeq){const wait=Math.max(0,f.dt-prev);if(wait>0)await sleep(wait);prev=f.dt;setModeInput(f.id,f.mode);setPosInput(f.id,parseFloat(f.pos));const ve=document.getElementById(`vel_${f.id}`);if(ve)ve.value=f.vel;const te=document.getElementById(`tau_${f.id}`);if(te)te.value=f.tau;const vl=document.getElementById(`vlim_${f.id}`);if(vl)vl.value=f.vlim;const ra=document.getElementById(`ratio_${f.id}`);if(ra)ra.value=f.ratio;await apply(f.id,true);}showGlobal(true,'playback done');}"
+    "async function demoStart(){const did=document.getElementById('demo_id').value;const r=await api({action:'demo_start',demo_id:did});showGlobal(r.ok,r.text);}"
+    "async function demoStop(){const r=await api({action:'demo_stop'});showGlobal(r.ok,r.text);}"
+    "async function demoReset(){const r=await api({action:'demo_reset'});showGlobal(r.ok,r.text);}"
     "</script></body></html>";
 
 static int16_t clamp_i16_from_f(float x, float scale)
@@ -289,6 +302,77 @@ static void dispatch_mode(uint8_t id, uint8_t mode, float pos, float vel, float 
     command_router_handle_can_rx(&msg);
 }
 
+static float triangle_0_to_3(float phase)
+{
+    float p = fmodf(phase, 2.0f);
+    if (p < 0.0f) {
+        p += 2.0f;
+    }
+    if (p < 1.0f) {
+        return p * 3.0f;
+    }
+    return (2.0f - p) * 3.0f;
+}
+
+static void wait_demo_stopped(int timeout_ms)
+{
+    int waited = 0;
+    while (s_demo_running && waited < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        waited += 10;
+    }
+}
+
+static void prepare_demo_all_posvel(int max_id)
+{
+    for (int id = 1; id <= max_id; ++id) {
+        dispatch_admin((uint8_t)id, 5, 0);
+        vTaskDelay(pdMS_TO_TICKS(8));
+        dispatch_admin((uint8_t)id, 7, 0);
+        vTaskDelay(pdMS_TO_TICKS(8));
+        dispatch_admin((uint8_t)id, 1, MOTOR_MODE_POS_VEL);
+        vTaskDelay(pdMS_TO_TICKS(8));
+        dispatch_admin((uint8_t)id, 4, 0);
+        vTaskDelay(pdMS_TO_TICKS(8));
+    }
+}
+
+static void demo_task(void *arg)
+{
+    (void)arg;
+    const app_config_t *cfg = app_config_get();
+    const int max_id = cfg->max_motors;
+    const float vlim = 1.0f;
+    const int demo_id = s_demo_id;
+    float t = 0.0f;
+
+    prepare_demo_all_posvel(max_id);
+
+    while (!s_demo_stop_req) {
+        for (int id = 1; id <= max_id; ++id) {
+            float pos = 0.0f;
+            if (demo_id == 1) {
+                pos = triangle_0_to_3(t);
+            } else if (demo_id == 2) {
+                const float phase = t * 1.2f + ((float)(id - 1) * 0.45f);
+                pos = 1.5f + 1.45f * sinf(phase);
+            } else {
+                const float phase = t + ((id % 2 == 0) ? 1.0f : 0.0f);
+                pos = triangle_0_to_3(phase);
+            }
+            dispatch_mode((uint8_t)id, MOTOR_MODE_POS_VEL, pos, 0.0f, 0.0f, vlim, 0.1f);
+        }
+        t += 0.05f;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    s_demo_running = false;
+    s_demo_stop_req = false;
+    s_demo_id = 0;
+    s_demo_task = NULL;
+    vTaskDelete(NULL);
+}
+
 static void log_action(const char *action, const uint8_t *ids, int n, int mode, float pos, float vel, float tau, float vlim, float ratio)
 {
     char ids_buf[96] = {0};
@@ -327,6 +411,77 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
     if (httpd_query_key_value(query, "action", action, sizeof(action)) != ESP_OK) {
         snprintf(resp, resp_len, "err missing action");
         return ESP_FAIL;
+    }
+
+    if (strcmp(action, "demo_start") == 0 || strcmp(action, "demo1_start") == 0) {
+        int demo_id = 1;
+        if (strcmp(action, "demo_start") == 0) {
+            char demo_id_s[8] = {0};
+            if (httpd_query_key_value(query, "demo_id", demo_id_s, sizeof(demo_id_s)) == ESP_OK) {
+                demo_id = atoi(demo_id_s);
+            }
+        }
+        if (demo_id < 1 || demo_id > 3) {
+            snprintf(resp, resp_len, "err bad demo_id");
+            return ESP_FAIL;
+        }
+
+        if (s_demo_running) {
+            s_demo_stop_req = true;
+            wait_demo_stopped(1500);
+        }
+        if (s_demo_running) {
+            snprintf(resp, resp_len, "err demo busy, stop timeout");
+            return ESP_FAIL;
+        }
+
+        s_demo_stop_req = false;
+        s_demo_id = demo_id;
+        s_demo_running = true;
+        if (xTaskCreatePinnedToCore(demo_task, "demo_task", 4096, NULL, 6, &s_demo_task, tskNO_AFFINITY) != pdPASS) {
+            s_demo_running = false;
+            s_demo_id = 0;
+            snprintf(resp, resp_len, "err demo start failed");
+            return ESP_FAIL;
+        }
+        strlcpy(s_last_query, query, sizeof(s_last_query));
+        s_last_query_us = esp_timer_get_time();
+        snprintf(resp, resp_len, "ok demo%d started", demo_id);
+        return ESP_OK;
+    }
+    if (strcmp(action, "demo_status") == 0) {
+        snprintf(resp, resp_len, "ok demo running=%d id=%d", s_demo_running ? 1 : 0, (int)s_demo_id);
+        return ESP_OK;
+    }
+    if (strcmp(action, "demo_stop") == 0 || strcmp(action, "demo1_stop") == 0) {
+        s_demo_stop_req = true;
+        strlcpy(s_last_query, query, sizeof(s_last_query));
+        s_last_query_us = esp_timer_get_time();
+        snprintf(resp, resp_len, "ok demo stopping");
+        return ESP_OK;
+    }
+    if (strcmp(action, "demo_reset") == 0) {
+        const app_config_t *cfg = app_config_get();
+        const int max_id = cfg->max_motors;
+        s_demo_stop_req = true;
+        wait_demo_stopped(1500);
+
+        for (int id = 1; id <= max_id; ++id) {
+            dispatch_admin((uint8_t)id, 5, 0);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            dispatch_admin((uint8_t)id, 7, 0);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            dispatch_admin((uint8_t)id, 1, MOTOR_MODE_POS_VEL);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            dispatch_admin((uint8_t)id, 4, 0);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            dispatch_mode((uint8_t)id, MOTOR_MODE_POS_VEL, 0.0f, 0.0f, 0.0f, 0.6f, 0.1f);
+            vTaskDelay(pdMS_TO_TICKS(12));
+        }
+        strlcpy(s_last_query, query, sizeof(s_last_query));
+        s_last_query_us = esp_timer_get_time();
+        snprintf(resp, resp_len, "ok demo reset count=%d", max_id);
+        return ESP_OK;
     }
     if (strcmp(action, "enable_all") == 0) {
         dispatch_admin(0, 4, 0);
@@ -369,6 +524,21 @@ static esp_err_t execute_action_from_query(const char *query, char *resp, size_t
     if (n <= 0 && strcmp(action, "estop") != 0) {
         snprintf(resp, resp_len, "err invalid ids");
         return ESP_FAIL;
+    }
+    if (s_demo_running) {
+        bool blocked =
+            strcmp(action, "enable") == 0 ||
+            strcmp(action, "disable") == 0 ||
+            strcmp(action, "clear_error") == 0 ||
+            strcmp(action, "set_zero") == 0 ||
+            strcmp(action, "set_gains") == 0 ||
+            strcmp(action, "set_vendor") == 0 ||
+            strcmp(action, "set_mode") == 0 ||
+            strcmp(action, "apply") == 0;
+        if (blocked) {
+            snprintf(resp, resp_len, "err demo running, stop demo first");
+            return ESP_FAIL;
+        }
     }
 
     if (strcmp(action, "enable") == 0) {

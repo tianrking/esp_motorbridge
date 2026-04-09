@@ -244,6 +244,17 @@ void motor_manager_estop_all(void)
     xSemaphoreGive(s_lock);
 }
 
+void motor_manager_clear_online_all(void)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = MOTORBRIDGE_MIN_MOTOR_ID; i <= s_max_motors; ++i) {
+        motor_state_t *m = &s_motors[i];
+        m->online = false;
+        m->last_seen_us = 0;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 void motor_manager_for_each(void (*fn)(motor_state_t *m, void *ctx), void *ctx)
 {
     if (fn == NULL) {

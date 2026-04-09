@@ -68,6 +68,7 @@ void motor_manager_mark_seen(uint8_t id);
 
 void motor_manager_mark_offline_by_timeout(int64_t now_us, int32_t timeout_ms);
 void motor_manager_estop_all(void);
+void motor_manager_clear_online_all(void);
 
 void motor_manager_for_each(void (*fn)(motor_state_t *m, void *ctx), void *ctx);
 
